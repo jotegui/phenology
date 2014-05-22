@@ -1,0 +1,188 @@
+Brief tutorial on RPostgreSQL
+========================================================
+
+Documentation mainly taken from here: https://code.google.com/p/rpostgresql/
+
+Setup
+-----
+
+RPostgreSQL is nothing but a wrapper of the DBI library, and a lot of the functions come from this library. Therefore, it is mandatory to have the latest version of the DBI library installed. Then, we can move on to installing RPostgreSQL
+
+```{r install_dependencies}
+#install.packages('DBI')
+
+#install.packages('RPostgreSQL')
+```
+
+Now, we just load it as a regular library
+
+```{r, load_library}
+library('RPostgreSQL')
+```
+
+To be able to query the database, we need to establish a connection with the same. We will do that with the `dbConnect` generic connection function. **ATTENTION:** The connection to the PostgreSQL server in auditrix.colorado.edu must be done through a SSH tunnel. Make sure you have the PuTTY session loaded before trying to connect to the database. If not, you will receive a RS-DBI driver error.
+
+```{r, echo=FALSE, vals}
+drv <- dbDriver("PostgreSQL")
+conn <- dbConnect(drv, host='localhost', port=5555, user='jotegui', password='1234', dbname='phenology')
+```
+
+```{r, eval=FALSE, basic_usage}
+# Parameters for the connection
+host = "localhost"
+port = 5555
+user = "" # Replace with your PostgreSQL database user name
+passwd = "" # Replace with your PostgreSQL database password
+dbname = "phenology"
+
+# First, load the driver
+drv <- dbDriver("PostgreSQL")
+
+# Actual command for connecting to the PostgreSQL database
+conn <- dbConnect(drv, host=host, port=port, user=user, password=passwd, dbname=dbname)
+```
+
+`dbConnect` is a DBI function, a generic method to establish a connection with any database. The first argument, `drv`, uses the previously selected driver in `dbDriver("PostgreSQL")`, which indicates `dbConnect` that the type of connection to be expected is a PostgreSQL database. The rest of the arguments are the values for the PostgreSQL connection.
+
+Basic usage
+-----------
+
+There are two ways of querying the database, and their usage depends on the expected output.
+
+### Small amount of records
+
+If the expected resultset has a low number of records, like counting the number of rows in a table, the best methd is `dbGetQuery`. This function submits and executes the query, and extracts the output, all in one operation.
+
+```{r dbgetquery}
+dbGetQuery(conn, "select count(*) as num_records from synonymies")
+```
+
+The first argument is the connection object, the one we created with the `dbConnect` function. The second argument is the actual SQL query. In this case, count every row in table synonymies and assign the name "num_records" to it. The output can be thrown to the screen (as in the previous example), or can be stored in an object.
+
+```{r dbgetquery_object}
+rs <- dbGetQuery(conn, "select count(*) as num_records from synonymies")
+rs
+typeof(rs)
+```
+
+`dbGetQuery` returns objects as named lists, with each column being an element consisting of an array of values. Each column can be referenced with their name or with their position in the list:
+
+```{r dataframe_object}
+rs <- dbGetQuery(conn, "select * from synonymies limit 5")
+rs
+typeof(rs)
+rs$old_name == rs[[2]]
+```
+
+There is a way of extracting a whole table (if the table is small enough to be handled), and that is by using the `dbReadTable` function. In this case, instead of launching a `select * from table_name` query, we can just say
+
+```{r dbreadtable}
+synonymies <- dbReadTable(conn, 'synonymies')
+```
+
+### Large amount of records
+
+If we are expecting a large amount of records, then it is better to use the `dbSendQuery` function. This time, the function sends the query to the database, but does not return the full dataset. Instead, it returns a `PostgreSQLResult` object, that works as a cursor to the result set. It is important to capture this cursor into an object:
+
+```{r dbsendquery}
+rs <- dbSendQuery(conn, "select * from synonymies")
+rs
+```
+
+Once we have the result set, we can take a look at the column names and types, to see if the query was good. To do that, we use the `dbColumnInfo` function:
+
+```{r dbcolumninfo}
+dbColumnInfo(rs)
+```
+
+This function only works if the result set is of type `PostgreSQLResult`. Now, in order to extract the actual values, we can use the `fetch` function, which retrieves a given number of rows from a `PostgreSQLResult` object:
+
+```{r fetch}
+fetch(rs, n=5)
+```
+
+In this case, we have specified `fetch` to return 5 records from the `rs` object. As any cursor, `fetch` iterates over the result set, without repeating the values, so if we execute again the same command:
+
+```{r fetch_2}
+fetch(rs, n=5)
+```
+
+we get records 6 to 10, and there is no way of getting records 1 to 5 back unless we re-execute the query. This is a great option for improving performance on the extraction of large datasets, and it is a good function to integrate in any `for` loop in R.
+
+`fetch` has a special `n` value, -1, that means "return everything left". Running `fetch(rs, n=-1)` in the first place returns all the records in the result set. If we run it now:
+
+```{r fetch_-1}
+fetch(rs, n=-1)
+```
+
+we extract the missing rows, those from line 11 to the last.
+
+Iterating to the last row in a result set sets that object free for re-assignment. In other words, if a cursor has started fetching records, but has not yet finished, the object is "blocked", and it cannot be assigned to another result set.
+
+```{r blocked_rs}
+rs <- dbSendQuery(conn, "select * from synonymies")
+fetch(rs, 5)
+rs <- dbSendQuery(conn, "select * from pheno_species")
+```
+
+There is a function that tells whether or not the result set has finished processing (fetching) the results, and that is `dbHasCompleted`:
+
+```{r dbhascompleted}
+dbHasCompleted(rs)
+```
+
+And to check how many rows have been fetched so far, we can use `dbGetRowCount`
+
+```{r dbgetrowcount}
+dbGetRowCount(rs)
+```
+
+Finally, to solve this issue, there is a function that closes the result set and releases the object. That function is `dbClearResult`
+
+```{r clear_result}
+dbClearResult(rs)
+rs <- dbSendQuery(conn, "select * from pheno_species limit 10")
+fetch(rs, n=-1)
+```
+
+
+Some PostgreSQL management functions
+------------------------------------
+
+This set of functions might be handy for the management of the database:
+
+`dbListTables` returns a list of the available tables in the database:
+
+```{r dblisttables}
+dbListTables(conn)[1:10] # To avoid cluttering, I have limited the output to 10 elements
+```
+
+We might also want to check if a table exists before querying it, with `dbExistsTable`:
+
+```{r dbexiststable}
+dbExistsTable(conn, 'ebird') # Should exist
+dbExistsTable(conn, 'foo_table') # Should not exist
+```
+
+We also might want to know the structure of a table. To know what columns are in a table, we can use the `dbListFields` function
+
+```{r dblistfields}
+dbListFields(conn, 'jetz_maps')
+```
+
+
+Finishing a connection
+----------------------
+
+When the processing has finished, make sure you close the connection
+
+```{r close_connection}
+dbDisconnect(conn)
+```
+
+And release the resources used by the driver
+
+```{r close_driver}
+dbUnloadDriver(drv)
+```
+
